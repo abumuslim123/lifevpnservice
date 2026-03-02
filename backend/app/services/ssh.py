@@ -2,6 +2,9 @@ import io
 import paramiko
 from typing import Tuple, Optional
 from app.models.server import Server
+from app.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 def get_ssh_client(server: Server) -> paramiko.SSHClient:
@@ -52,10 +55,23 @@ def upload_file(server: Server, remote_path: str, content: str) -> None:
 
 
 def test_connection(server: Server) -> Tuple[bool, str]:
+    logger.info(
+        "Testing SSH connection",
+        extra={"server_id": server.id, "ip": server.ip_address, "port": server.ssh_port},
+    )
     try:
         stdout, stderr, code = execute_command(server, "echo OK")
         if code == 0 and "OK" in stdout:
+            logger.info("SSH connection successful", extra={"server_id": server.id})
             return True, "Connection successful"
+        logger.warning(
+            "SSH connection returned non-zero",
+            extra={"server_id": server.id, "code": code, "stderr": stderr},
+        )
         return False, stderr or "Unknown error"
-    except Exception as e:
-        return False, str(e)
+    except Exception as exc:
+        logger.error(
+            "SSH connection failed",
+            extra={"server_id": server.id, "error": str(exc)},
+        )
+        return False, str(exc)

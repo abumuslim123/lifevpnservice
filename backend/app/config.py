@@ -17,6 +17,11 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 60 * 24
     REFRESH_TOKEN_EXPIRE_DAYS: int = 30
 
+    # Ключ шифрования SSH-credentials в БД (Fernet).
+    # Сгенерировать: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    # Если пустой — credentials хранятся в открытом виде (только для dev).
+    ENCRYPTION_KEY: str = ""
+
     FIRST_ADMIN_USERNAME: str = "admin"
     FIRST_ADMIN_PASSWORD: str = "admin123"
     FIRST_ADMIN_EMAIL: str = "admin@vpnservice.local"

@@ -5,6 +5,9 @@ from sqlalchemy import select
 
 from app.config import settings
 from app.database import engine, AsyncSessionLocal, Base
+from app.utils.logging import setup_logging
+
+setup_logging(debug=settings.DEBUG)
 
 
 @asynccontextmanager

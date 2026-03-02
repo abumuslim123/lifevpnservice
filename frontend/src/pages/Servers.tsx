@@ -11,6 +11,7 @@ import { Card, CardContent } from '@/components/ui/Card'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/Table'
 import { useToast } from '@/components/ui/Toast'
 import { useBackgroundTasks } from '@/hooks/useBackgroundTasks'
+import { useServerStatusSSE } from '@/hooks/useServerStatusSSE'
 import { formatDate } from '@/lib/utils'
 import { Plus, Wifi, Trash2, Download, RefreshCw, HelpCircle, Edit } from 'lucide-react'
 import type { Server, ProtocolType } from '@/types'
@@ -93,14 +94,11 @@ export default function ServersPage() {
   const [uninstallingProto, setUninstallingProto] = useState<string | null>(null)
   const [form, setForm] = useState(emptyForm)
 
+  useServerStatusSSE()
+
   const { data: servers = [], isLoading } = useQuery({
     queryKey: ['servers'],
     queryFn: serversApi.list,
-    refetchInterval: (query) => {
-      const data = query.state.data as Server[] | undefined
-      if (!data) return false
-      return data.some(s => s.status === 'connecting' || s.status === 'unknown') ? 5000 : false
-    },
   })
 
   const checkAllMut = useMutation({

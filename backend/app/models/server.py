@@ -2,6 +2,7 @@ from datetime import datetime
 from typing import Optional, List
 from sqlalchemy import String, Integer, Boolean, DateTime, Text, JSON, Enum as SAEnum
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from app.utils.crypto import EncryptedText
 from sqlalchemy.sql import func
 import enum
 
@@ -32,8 +33,8 @@ class Server(Base):
     ip_address: Mapped[str] = mapped_column(String(45), nullable=False, index=True)
     ssh_port: Mapped[int] = mapped_column(Integer, default=22, nullable=False)
     ssh_user: Mapped[str] = mapped_column(String(64), default="root", nullable=False)
-    ssh_password: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    ssh_private_key: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    ssh_password: Mapped[Optional[str]] = mapped_column(EncryptedText, nullable=True)
+    ssh_private_key: Mapped[Optional[str]] = mapped_column(EncryptedText, nullable=True)
     location: Mapped[Optional[str]] = mapped_column(String(128), nullable=True)
     country_code: Mapped[Optional[str]] = mapped_column(String(4), nullable=True)
     os_type: Mapped[ServerOS] = mapped_column(SAEnum(ServerOS), default=ServerOS.UBUNTU, nullable=False)
@@ -49,7 +50,7 @@ class Server(Base):
         "ProtocolConfig", back_populates="server", cascade="all, delete-orphan"
     )
     vpn_profiles: Mapped[List["VpnProfile"]] = relationship(  # noqa: F821
-        "VpnProfile", back_populates="server"
+        "VpnProfile", back_populates="server", cascade="all, delete-orphan"
     )
     proxy_configs: Mapped[List["ProxyConfig"]] = relationship(  # noqa: F821
         "ProxyConfig", back_populates="server", cascade="all, delete-orphan"

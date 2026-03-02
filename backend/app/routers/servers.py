@@ -1,18 +1,24 @@
+import asyncio
+import json
+from datetime import datetime
 from typing import Annotated, List
+
 from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-import asyncio
-from datetime import datetime
 
 from app.database import get_db, AsyncSessionLocal
 from app.models.server import Server, ServerStatus
 from app.models.user import User
 from app.schemas.server import ServerCreate, ServerUpdate, ServerRead
-from app.routers.deps import get_current_active_user, require_manager
+from app.routers.deps import get_current_active_user, require_manager, get_user_from_query_token
+from app.utils.sse import broadcaster
+from app.utils.logging import get_logger
 
 router = APIRouter(prefix="/api/servers", tags=["servers"])
+logger = get_logger(__name__)
 
 
 async def _background_test_connection(server_id: int) -> None:
@@ -23,6 +29,8 @@ async def _background_test_connection(server_id: int) -> None:
         server = result.scalar_one_or_none()
         if not server:
             return
+
+        logger.info("SSH check started", extra={"server_id": server_id, "ip": server.ip_address})
         server.status = ServerStatus.CONNECTING
         await db.commit()
 
@@ -31,13 +39,58 @@ async def _background_test_connection(server_id: int) -> None:
             return test_connection(server)
 
         try:
-            ok, _ = await loop.run_in_executor(None, _test)
+            ok, msg = await loop.run_in_executor(None, _test)
             server.status = ServerStatus.ONLINE if ok else ServerStatus.OFFLINE
-        except Exception:
+            logger.info(
+                "SSH check finished",
+                extra={"server_id": server_id, "status": server.status.value, "msg": msg},
+            )
+        except Exception as exc:
             server.status = ServerStatus.OFFLINE
+            logger.error(
+                "SSH check exception",
+                extra={"server_id": server_id, "error": str(exc)},
+                exc_info=True,
+            )
 
         server.last_check_at = datetime.utcnow()
         await db.commit()
+
+        await broadcaster.broadcast({
+            "type": "status_update",
+            "server_id": server_id,
+            "status": server.status.value,
+            "last_check_at": server.last_check_at.isoformat(),
+        })
+
+
+@router.get("/status/stream")
+async def server_status_stream(
+    _: Annotated[User, Depends(get_user_from_query_token)],
+):
+    """SSE-поток обновлений статуса серверов. Подключаться с ?token=<JWT>."""
+    q = broadcaster.subscribe()
+
+    async def event_generator():
+        try:
+            while True:
+                try:
+                    data = await asyncio.wait_for(q.get(), timeout=25)
+                    yield f"data: {json.dumps(data)}\n\n"
+                except asyncio.TimeoutError:
+                    yield ": ping\n\n"
+        finally:
+            broadcaster.unsubscribe(q)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+            "Connection": "keep-alive",
+        },
+    )
 
 
 @router.get("", response_model=List[ServerRead])
@@ -60,6 +113,7 @@ async def create_server(
     db.add(server)
     await db.commit()
     await db.refresh(server)
+    logger.info("Server created", extra={"server_id": server.id, "ip": server.ip_address})
     # Запускаем проверку SSH-соединения в фоне сразу после добавления
     background_tasks.add_task(_background_test_connection, server.id)
     return server
@@ -106,8 +160,10 @@ async def delete_server(
     server = result.scalar_one_or_none()
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
+    server_ip = server.ip_address
     await db.delete(server)
     await db.commit()
+    logger.info("Server deleted", extra={"server_id": server_id, "ip": server_ip})
 
 
 @router.post("/check-all")
@@ -146,12 +202,29 @@ async def test_server_connection(
         loop = asyncio.get_event_loop()
         ok, message = await loop.run_in_executor(None, _test)
         server.status = ServerStatus.ONLINE if ok else ServerStatus.OFFLINE
-    except Exception as e:
-        ok, message = False, str(e)
+        logger.info(
+            "SSH test finished",
+            extra={"server_id": server_id, "status": server.status.value, "msg": message},
+        )
+    except Exception as exc:
+        ok, message = False, str(exc)
         server.status = ServerStatus.OFFLINE
+        logger.error(
+            "SSH test exception",
+            extra={"server_id": server_id, "error": message},
+            exc_info=True,
+        )
 
     server.last_check_at = datetime.utcnow()
     await db.commit()
+
+    await broadcaster.broadcast({
+        "type": "status_update",
+        "server_id": server_id,
+        "status": server.status.value,
+        "last_check_at": server.last_check_at.isoformat(),
+    })
+
     return {"success": ok, "message": message}
 
 
