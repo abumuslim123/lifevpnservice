@@ -26,4 +26,6 @@ export const serversApi = {
     (await api.post(`/servers/${id}/uninstall-protocol`, { protocol, remove_all_xray: removeAllXray })).data,
   checkAll: async (): Promise<{ message: string; count: number }> =>
     (await api.post('/servers/check-all')).data,
+  refreshKeys: async (id: number): Promise<{ updated: Record<string, string>; message: string }> =>
+    (await api.post(`/servers/${id}/refresh-keys`)).data,
 }

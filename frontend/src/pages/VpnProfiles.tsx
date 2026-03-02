@@ -12,7 +12,7 @@ import { Card, CardContent } from '@/components/ui/Card'
 import { Table, TableHeader, TableBody, TableRow, TableHead, TableCell } from '@/components/ui/Table'
 import { useToast } from '@/components/ui/Toast'
 import { formatDate } from '@/lib/utils'
-import { Plus, Trash2, ArrowLeftRight, Download, Key } from 'lucide-react'
+import { Plus, Trash2, ArrowLeftRight, Download, Key, QrCode, Link } from 'lucide-react'
 import { PROTOCOL_LABELS, CLIENT_APP_OPTIONS } from '@/types'
 import type { VpnProfile, ProtocolType } from '@/types'
 
@@ -27,8 +27,9 @@ export default function VpnProfilesPage() {
   const [downloadProfile, setDownloadProfile] = useState<VpnProfile | null>(null)
   const [downloadApp, setDownloadApp] = useState<string>('wireguard')
   const [showCreds, setShowCreds] = useState<VpnProfile | null>(null)
+  const [qrData, setQrData] = useState<{ link: string; qr_base64: string } | null>(null)
   const [form, setForm] = useState({
-    name: '', server_id: '', active_protocol: 'wireguard', client_id: '', user_id: '', notes: '',
+    name: '', server_id: '', active_protocol: 'wireguard', client_id: '', user_id: '', notes: '', wg_server_public_key: '',
   })
 
   const { data: profiles = [], isLoading } = useQuery({ queryKey: ['vpn-profiles'], queryFn: () => vpnProfilesApi.list() })
@@ -63,18 +64,26 @@ export default function VpnProfilesPage() {
 
   const handleCreate = () => {
     if (!form.server_id) return toast('Выберите сервер', 'error')
+    const isWg = form.active_protocol === 'wireguard' || form.active_protocol === 'amnezia_wg'
     createMut.mutate({
       name: form.name,
       server_id: parseInt(form.server_id),
       active_protocol: form.active_protocol as ProtocolType,
       client_id: form.client_id ? parseInt(form.client_id) : undefined,
       notes: form.notes || undefined,
+      ...(isWg && form.wg_server_public_key ? { wg_server_public_key: form.wg_server_public_key } : {}),
     } as any)
   }
 
+  const qrMut = useMutation({
+    mutationFn: (id: number) => vpnProfilesApi.qr(id),
+    onSuccess: setQrData,
+    onError: () => toast('Ошибка получения QR кода', 'error'),
+  })
+
   const handleDownload = (profile: VpnProfile, app: string) => {
     const token = localStorage.getItem('access_token')
-    const url = `/api/vpn-profiles/${profile.id}/download-config?app=${app}`
+    const url = `/api/vpn-profiles/${profile.id}/download-config?app=${app}&token=${token}`
     const link = document.createElement('a')
     link.href = url
     link.click()
@@ -131,6 +140,12 @@ export default function VpnProfilesPage() {
                         >
                           <ArrowLeftRight className="h-4 w-4" />
                         </Button>
+                        <Button variant="ghost" size="icon" title="QR код"
+                          onClick={() => qrMut.mutate(p.id)}
+                          isLoading={qrMut.isPending}
+                        >
+                          <QrCode className="h-4 w-4" />
+                        </Button>
                         <Button variant="ghost" size="icon" title="Скачать конфиг"
                           onClick={() => setDownloadProfile(p)}
                         >
@@ -163,6 +178,14 @@ export default function VpnProfilesPage() {
           <Input label="Название *" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="Иван Иванов - WG" />
           <Select label="Сервер *" value={form.server_id} onChange={e => setForm({ ...form, server_id: e.target.value })} options={serverOptions} placeholder="Выберите сервер" />
           <Select label="Протокол *" value={form.active_protocol} onChange={e => setForm({ ...form, active_protocol: e.target.value })} options={PROTOCOL_OPTIONS} />
+          {(form.active_protocol === 'wireguard' || form.active_protocol === 'amnezia_wg') && (
+            <Input
+              label="Публичный ключ WG сервера"
+              value={form.wg_server_public_key}
+              onChange={e => setForm({ ...form, wg_server_public_key: e.target.value })}
+              placeholder="Вставьте публичный ключ (wg show wg0 public-key)"
+            />
+          )}
           <Select label="Клиент" value={form.client_id} onChange={e => setForm({ ...form, client_id: e.target.value })} options={clientOptions} />
           <Input label="Заметки" value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} />
           <div className="flex justify-end gap-2 mt-2">
@@ -198,6 +221,33 @@ export default function VpnProfilesPage() {
             </Button>
           </div>
         </div>
+      </Modal>
+
+      <Modal isOpen={!!qrData} onClose={() => setQrData(null)} title="QR код для подключения" className="max-w-md">
+        {qrData && (
+          <div className="flex flex-col items-center gap-4">
+            {qrData.qr_base64 && (
+              <img
+                src={`data:image/png;base64,${qrData.qr_base64}`}
+                alt="QR Code"
+                className="h-48 w-48 rounded-lg border border-border"
+              />
+            )}
+            <div className="w-full">
+              <p className="text-xs text-muted-foreground mb-1">Ссылка / конфиг для подключения:</p>
+              <code className="block w-full text-xs bg-muted rounded p-2 break-all max-h-32 overflow-y-auto">{qrData.link || '—'}</code>
+            </div>
+            {qrData.link && (
+              <Button
+                variant="outline"
+                onClick={() => { navigator.clipboard.writeText(qrData.link); toast('Скопировано!', 'success') }}
+                className="w-full"
+              >
+                <Link className="h-4 w-4" /> Копировать
+              </Button>
+            )}
+          </div>
+        )}
       </Modal>
 
       <Modal isOpen={!!showCreds} onClose={() => setShowCreds(null)} title={`Учётные данные — ${showCreds?.name}`} className="max-w-2xl">

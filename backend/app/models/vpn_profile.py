@@ -19,8 +19,8 @@ class VpnProfile(Base):
     user_id: Mapped[Optional[int]] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
     )
-    server_id: Mapped[int] = mapped_column(
-        ForeignKey("servers.id", ondelete="CASCADE"), nullable=False, index=True
+    server_id: Mapped[Optional[int]] = mapped_column(
+        ForeignKey("servers.id", ondelete="SET NULL"), nullable=True, index=True
     )
     active_protocol: Mapped[ProtocolType] = mapped_column(SAEnum(ProtocolType), nullable=False)
     enabled_protocols: Mapped[Optional[list]] = mapped_column(JSON, default=list, nullable=True)

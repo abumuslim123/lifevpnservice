@@ -50,7 +50,7 @@ class Server(Base):
         "ProtocolConfig", back_populates="server", cascade="all, delete-orphan"
     )
     vpn_profiles: Mapped[List["VpnProfile"]] = relationship(  # noqa: F821
-        "VpnProfile", back_populates="server", cascade="all, delete-orphan"
+        "VpnProfile", back_populates="server", passive_deletes=True
     )
     proxy_configs: Mapped[List["ProxyConfig"]] = relationship(  # noqa: F821
         "ProxyConfig", back_populates="server", cascade="all, delete-orphan"

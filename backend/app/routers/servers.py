@@ -12,6 +12,7 @@ from sqlalchemy import select
 from app.database import get_db, AsyncSessionLocal
 from app.models.server import Server, ServerStatus
 from app.models.user import User
+from app.models.vpn_profile import VpnProfile
 from app.schemas.server import ServerCreate, ServerUpdate, ServerRead
 from app.routers.deps import get_current_active_user, require_manager, get_user_from_query_token
 from app.utils.sse import broadcaster
@@ -43,7 +44,7 @@ async def _background_test_connection(server_id: int) -> None:
             server.status = ServerStatus.ONLINE if ok else ServerStatus.OFFLINE
             logger.info(
                 "SSH check finished",
-                extra={"server_id": server_id, "status": server.status.value, "msg": msg},
+                extra={"server_id": server_id, "status": server.status.value, "ssh_msg": msg},
             )
         except Exception as exc:
             server.status = ServerStatus.OFFLINE
@@ -161,6 +162,17 @@ async def delete_server(
     if not server:
         raise HTTPException(status_code=404, detail="Server not found")
     server_ip = server.ip_address
+
+    # Деактивируем все VPN профили сервера (server_id → NULL, is_active → False)
+    profiles_result = await db.execute(select(VpnProfile).where(VpnProfile.server_id == server_id))
+    profiles = profiles_result.scalars().all()
+    for p in profiles:
+        p.server_id = None
+        p.is_active = False
+    if profiles:
+        await db.flush()
+        logger.info("Deactivated profiles on server delete", extra={"server_id": server_id, "count": len(profiles)})
+
     await db.delete(server)
     await db.commit()
     logger.info("Server deleted", extra={"server_id": server_id, "ip": server_ip})
@@ -204,7 +216,7 @@ async def test_server_connection(
         server.status = ServerStatus.ONLINE if ok else ServerStatus.OFFLINE
         logger.info(
             "SSH test finished",
-            extra={"server_id": server_id, "status": server.status.value, "msg": message},
+            extra={"server_id": server_id, "status": server.status.value, "ssh_msg": message},
         )
     except Exception as exc:
         ok, message = False, str(exc)
@@ -228,29 +240,47 @@ async def test_server_connection(
     return {"success": ok, "message": message}
 
 
-def _run_install(server: Server, protocol: str) -> tuple[bool, str]:
-    """Запускает установку одного протокола через SSH."""
+def _run_install(server: Server, protocol: str) -> tuple[bool, str, dict]:
+    """Запускает установку одного протокола через SSH.
+    Возвращает (success, message, extra_data) где extra_data сохраняется в installed_protocols."""
     if protocol == "wireguard":
-        from app.services.wireguard import install_wireguard
-        return install_wireguard(server)
+        from app.services.wireguard import install_wireguard, get_server_public_key
+        ok, msg = install_wireguard(server)
+        extra: dict = {}
+        if ok:
+            pub = get_server_public_key(server)
+            if pub:
+                extra["wg_public_key"] = pub
+        return ok, msg, extra
+    elif protocol == "amnezia_wg":
+        from app.services.amnezia import install_amneziawg
+        from app.services.wireguard import get_server_public_key
+        ok, msg = install_amneziawg(server)
+        extra = {}
+        if ok:
+            pub = get_server_public_key(server, interface="awg0")
+            if pub:
+                extra["awg_public_key"] = pub
+        return ok, msg, extra
     elif protocol in ("xray_vless", "xray_vmess", "xray_trojan", "xray_shadowsocks"):
         from app.services.xray import install_xray
-        return install_xray(server)
+        ok, msg = install_xray(server)
+        return ok, msg, {}
     elif protocol == "openvpn":
         from app.services.openvpn import install_openvpn
-        return install_openvpn(server)
+        ok, msg = install_openvpn(server)
+        return ok, msg, {}
     elif protocol == "ikev2":
         from app.services.ikev2 import setup_ikev2
-        return setup_ikev2(server, server.ip_address)
+        ok, msg = setup_ikev2(server, server.ip_address)
+        return ok, msg, {}
     elif protocol == "l2tp":
         from app.services.ikev2 import setup_l2tp
         import secrets, string
         psk = ''.join(secrets.choice(string.ascii_letters + string.digits) for _ in range(24))
-        return setup_l2tp(server, psk)
-    elif protocol == "amnezia_wg":
-        from app.services.amnezia import install_amneziawg
-        return install_amneziawg(server)
-    return False, f"Протокол не поддерживается: {protocol}"
+        ok, msg = setup_l2tp(server, psk)
+        return ok, msg, {"l2tp_psk": psk} if ok else {}
+    return False, f"Протокол не поддерживается: {protocol}", {}
 
 
 @router.post("/{server_id}/install-protocol")
@@ -267,11 +297,12 @@ async def install_protocol(
         raise HTTPException(status_code=404, detail="Server not found")
 
     loop = asyncio.get_event_loop()
-    ok, message = await loop.run_in_executor(None, _run_install, server, protocol)
+    ok, message, extra = await loop.run_in_executor(None, _run_install, server, protocol)
 
     if ok:
         installed = dict(server.installed_protocols or {})
         installed[protocol] = True
+        installed.update(extra)
         server.installed_protocols = installed
         await db.commit()
 
@@ -316,17 +347,18 @@ async def install_protocols(
                     installed[proto] = True
                     results.append({"protocol": proto, "success": True, "message": "Xray уже установлен"})
                     continue
-            ok, message = await loop.run_in_executor(None, _run_install, server, proto)
+            ok, message, extra = await loop.run_in_executor(None, _run_install, server, proto)
             if ok:
                 xray_installed = True
-                # Помечаем все xray-протоколы как установленные вместе с xray-core
                 for xp in xray_protocols:
                     if xp in requested:
                         installed[xp] = True
+                installed.update(extra)
         else:
-            ok, message = await loop.run_in_executor(None, _run_install, server, proto)
+            ok, message, extra = await loop.run_in_executor(None, _run_install, server, proto)
             if ok:
                 installed[proto] = True
+                installed.update(extra)
 
         results.append({"protocol": proto, "success": ok, "message": message})
 
@@ -455,12 +487,77 @@ async def uninstall_protocol(
 
     if ok:
         if protocol in xray_protocols and actually_remove_binary:
-            # Удаляем все xray-метки вместе с xray-core
             for xp in xray_protocols:
                 installed.pop(xp, None)
+            # Деактивируем профили всех xray-протоколов
+            affected_protos = list(xray_protocols)
         else:
             installed.pop(protocol, None)
+            affected_protos = [protocol]
+
         server.installed_protocols = installed
+
+        # Деактивируем VPN профили с удалённым протоколом
+        from app.models.protocol_config import ProtocolType
+        from sqlalchemy import and_
+        for ap in affected_protos:
+            try:
+                proto_enum = ProtocolType(ap)
+                pr_result = await db.execute(
+                    select(VpnProfile).where(
+                        and_(VpnProfile.server_id == server_id, VpnProfile.active_protocol == proto_enum)
+                    )
+                )
+                deactivated = pr_result.scalars().all()
+                for p in deactivated:
+                    p.is_active = False
+                if deactivated:
+                    logger.info("Deactivated profiles on protocol uninstall", extra={
+                        "server_id": server_id, "protocol": ap, "count": len(deactivated)
+                    })
+            except ValueError:
+                pass
+
         await db.commit()
 
     return {"success": ok, "message": message}
+
+
+@router.post("/{server_id}/refresh-keys")
+async def refresh_server_keys(
+    server_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    _: Annotated[User, Depends(require_manager)],
+):
+    """Получить и сохранить публичные ключи WireGuard/AmneziaWG с сервера."""
+    result = await db.execute(select(Server).where(Server.id == server_id))
+    server = result.scalar_one_or_none()
+    if not server:
+        raise HTTPException(status_code=404, detail="Server not found")
+
+    installed = dict(server.installed_protocols or {})
+    updated: dict = {}
+    loop = asyncio.get_event_loop()
+
+    if installed.get("wireguard"):
+        def _get_wg():
+            from app.services.wireguard import ensure_server_config
+            return ensure_server_config(server, interface="wg0", port=51820)
+        pub = await loop.run_in_executor(None, _get_wg)
+        if pub:
+            installed["wg_public_key"] = pub
+            updated["wg_public_key"] = pub
+
+    if installed.get("amnezia_wg"):
+        def _get_awg():
+            from app.services.wireguard import ensure_server_config
+            return ensure_server_config(server, interface="awg0", port=51821)
+        pub = await loop.run_in_executor(None, _get_awg)
+        if pub:
+            installed["awg_public_key"] = pub
+            updated["awg_public_key"] = pub
+
+    server.installed_protocols = installed
+    await db.commit()
+
+    return {"updated": updated, "message": f"Обновлено ключей: {len(updated)}"}

@@ -3,6 +3,9 @@ import ipaddress
 from typing import Dict, Any, Tuple
 from app.models.server import Server
 from app.services.ssh import execute_command, upload_file
+from app.utils.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 def generate_keypair() -> Tuple[str, str]:
@@ -143,6 +146,55 @@ def remove_peer_from_server(server: Server, interface_name: str, peer_public_key
         return False, stderr
     execute_command(server, f"wg-quick save {interface_name}")
     return True, "Peer removed"
+
+
+def get_server_public_key(server: Server, interface: str = "wg0") -> str:
+    """Получить публичный ключ WireGuard сервера через SSH."""
+    # Метод 1: wg show для конкретного интерфейса (интерфейс поднят)
+    stdout, _, code = execute_command(server, f"wg show {interface} public-key 2>/dev/null")
+    if code == 0 and stdout.strip():
+        return stdout.strip()
+    # Метод 2: wg show all
+    stdout, _, code = execute_command(server, "wg show all public-key 2>/dev/null | awk '{print $2}' | head -1")
+    if code == 0 and stdout.strip():
+        return stdout.strip()
+    # Метод 3: grep PrivateKey из конфига
+    stdout, _, code = execute_command(
+        server,
+        f"grep -m1 '^PrivateKey' /etc/wireguard/{interface}.conf 2>/dev/null | awk '{{print $3}}' | wg pubkey 2>/dev/null"
+    )
+    if code == 0 and stdout.strip():
+        return stdout.strip()
+    # Метод 4: любой .conf
+    stdout, _, code = execute_command(
+        server,
+        "f=$(ls /etc/wireguard/*.conf 2>/dev/null | head -1); [ -n \"$f\" ] && grep -m1 '^PrivateKey' \"$f\" | awk '{print $3}' | wg pubkey 2>/dev/null"
+    )
+    if code == 0 and stdout.strip():
+        return stdout.strip()
+    return ""
+
+
+def ensure_server_config(server: Server, interface: str = "wg0", port: int = 51820) -> str:
+    """Убедиться что серверный конфиг WireGuard существует и интерфейс поднят.
+    Если конфига нет — создаёт его автоматически.
+    Возвращает публичный ключ сервера."""
+    # Сначала пробуем получить существующий ключ
+    pub = get_server_public_key(server, interface)
+    if pub:
+        return pub
+
+    # Конфига нет — создаём серверный ключ и конфиг
+    logger.info("WG server config missing, initializing", extra={"server_id": server.id})
+    server_private_key, server_public_key = generate_keypair()
+    config = build_server_config(server_private_key, port, [], server_address="10.8.0.1/24")
+    ok, msg = apply_server_config(server, interface, config, port)
+    if ok:
+        logger.info("WG server initialized", extra={"server_id": server.id, "pub": server_public_key[:20]})
+        return server_public_key
+
+    logger.error("WG server init failed", extra={"server_id": server.id, "msg": msg})
+    return ""
 
 
 def create_profile_credentials(

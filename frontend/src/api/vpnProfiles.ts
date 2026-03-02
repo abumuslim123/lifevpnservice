@@ -14,4 +14,6 @@ export const vpnProfilesApi = {
     (await api.patch(`/vpn-profiles/${id}/switch-protocol`, { protocol })).data,
   downloadConfig: (id: number, app: string): string =>
     `/api/vpn-profiles/${id}/download-config?app=${app}&token=${localStorage.getItem('access_token')}`,
+  qr: async (id: number): Promise<{ link: string; qr_base64: string }> =>
+    (await api.get(`/vpn-profiles/${id}/qr`)).data,
 }

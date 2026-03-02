@@ -17,7 +17,7 @@ class VpnProfileBase(BaseModel):
 
 
 class VpnProfileCreate(VpnProfileBase):
-    pass
+    wg_server_public_key: Optional[str] = None  # публичный ключ WireGuard/AmneziaWG сервера
 
 
 class VpnProfileUpdate(BaseModel):

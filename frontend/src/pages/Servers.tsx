@@ -13,7 +13,7 @@ import { useToast } from '@/components/ui/Toast'
 import { useBackgroundTasks } from '@/hooks/useBackgroundTasks'
 import { useServerStatusSSE } from '@/hooks/useServerStatusSSE'
 import { formatDate } from '@/lib/utils'
-import { Plus, Wifi, Trash2, Download, RefreshCw, HelpCircle, Edit } from 'lucide-react'
+import { Plus, Wifi, Trash2, Download, RefreshCw, HelpCircle, Edit, KeyRound } from 'lucide-react'
 import type { Server, ProtocolType } from '@/types'
 import { PROTOCOL_LABELS } from '@/types'
 
@@ -140,6 +140,15 @@ export default function ServersPage() {
       qc.invalidateQueries({ queryKey: ['servers'] })
       toast(res.message, res.success ? 'success' : 'error')
     },
+  })
+
+  const refreshKeysMut = useMutation({
+    mutationFn: serversApi.refreshKeys,
+    onSuccess: (res) => {
+      qc.invalidateQueries({ queryKey: ['servers'] })
+      toast(res.message, Object.keys(res.updated).length > 0 ? 'success' : 'warning')
+    },
+    onError: () => toast('Ошибка обновления ключей', 'error'),
   })
 
 
@@ -320,6 +329,14 @@ export default function ServersPage() {
                         title="Редактировать сервер"
                       >
                         <Edit className="h-4 w-4" />
+                      </Button>
+                      <Button
+                        variant="ghost" size="icon"
+                        isLoading={refreshKeysMut.isPending && refreshKeysMut.variables === s.id}
+                        onClick={() => refreshKeysMut.mutate(s.id)}
+                        title="Обновить ключи WireGuard/AmneziaWG с сервера"
+                      >
+                        <KeyRound className="h-4 w-4" />
                       </Button>
                       <Button
                         variant="ghost" size="icon"

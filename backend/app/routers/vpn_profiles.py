@@ -11,7 +11,7 @@ from app.models.server import Server
 from app.models.user import User
 from app.models.protocol_config import ProtocolType
 from app.schemas.vpn_profile import VpnProfileCreate, VpnProfileUpdate, VpnProfileRead, SwitchProtocolRequest
-from app.routers.deps import get_current_active_user, require_manager
+from app.routers.deps import get_current_active_user, require_manager, get_user_from_query_token
 
 router = APIRouter(prefix="/api/vpn-profiles", tags=["vpn-profiles"])
 
@@ -65,12 +65,25 @@ async def create_profile(
     def _generate_creds():
         proto = payload.active_protocol.value
         if proto == "wireguard":
-            from app.services.wireguard import create_profile_credentials
-            proto_cfg = {"server_public_key": (server.installed_protocols or {}).get("wg_public_key", "")}
-            return create_profile_credentials(server, proto_cfg.get("server_public_key", ""), server.ip_address, 51820)
+            from app.services.wireguard import create_profile_credentials, ensure_server_config
+            pub = payload.wg_server_public_key or (server.installed_protocols or {}).get("wg_public_key", "")
+            if not pub:
+                pub = ensure_server_config(server, interface="wg0", port=51820)
+                if pub:
+                    installed = dict(server.installed_protocols or {})
+                    installed["wg_public_key"] = pub
+                    server.installed_protocols = installed
+            return create_profile_credentials(server, pub, server.ip_address, 51820)
         elif proto == "amnezia_wg":
             from app.services.amnezia import create_awg_profile_credentials
-            pub = (server.installed_protocols or {}).get("awg_public_key", "")
+            from app.services.wireguard import ensure_server_config
+            pub = payload.wg_server_public_key or (server.installed_protocols or {}).get("awg_public_key", "")
+            if not pub:
+                pub = ensure_server_config(server, interface="awg0", port=51821)
+                if pub:
+                    installed = dict(server.installed_protocols or {})
+                    installed["awg_public_key"] = pub
+                    server.installed_protocols = installed
             return create_awg_profile_credentials(server, pub, 51821)
         elif proto == "xray_vless":
             from app.services.xray import create_vless_profile_credentials
@@ -150,12 +163,25 @@ async def switch_protocol(
 
     def _regen_creds():
         if proto == "wireguard":
-            from app.services.wireguard import create_profile_credentials
+            from app.services.wireguard import create_profile_credentials, ensure_server_config
             pub = (server.installed_protocols or {}).get("wg_public_key", "")
+            if not pub:
+                pub = ensure_server_config(server, interface="wg0", port=51820)
+                if pub:
+                    installed = dict(server.installed_protocols or {})
+                    installed["wg_public_key"] = pub
+                    server.installed_protocols = installed
             return create_profile_credentials(server, pub, server.ip_address, 51820)
         elif proto == "amnezia_wg":
             from app.services.amnezia import create_awg_profile_credentials
+            from app.services.wireguard import ensure_server_config
             pub = (server.installed_protocols or {}).get("awg_public_key", "")
+            if not pub:
+                pub = ensure_server_config(server, interface="awg0", port=51821)
+                if pub:
+                    installed = dict(server.installed_protocols or {})
+                    installed["awg_public_key"] = pub
+                    server.installed_protocols = installed
             return create_awg_profile_credentials(server, pub, 51821)
         elif proto == "xray_vless":
             from app.services.xray import create_vless_profile_credentials
@@ -191,7 +217,7 @@ async def download_config(
     profile_id: int,
     app: str = "wireguard",
     db: Annotated[AsyncSession, Depends(get_db)] = None,
-    _: Annotated[User, Depends(get_current_active_user)] = None,
+    _: Annotated[User, Depends(get_user_from_query_token)] = None,
 ):
     profile = await _get_or_404(db, profile_id)
     server_result = await db.execute(select(Server).where(Server.id == profile.server_id))
@@ -211,3 +237,60 @@ async def download_config(
         media_type=result["mime"],
         headers={"Content-Disposition": f'attachment; filename="{result["filename"]}"'},
     )
+
+
+@router.get("/{profile_id}/qr")
+async def get_qr(
+    profile_id: int,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    _: Annotated[User, Depends(get_current_active_user)],
+):
+    profile = await _get_or_404(db, profile_id)
+    server_result = await db.execute(select(Server).where(Server.id == profile.server_id))
+    server = server_result.scalar_one_or_none()
+
+    creds = profile.credentials or {}
+    proto = profile.active_protocol.value
+    server_ip = server.ip_address if server else ""
+    name = profile.name
+
+    if proto == "wireguard":
+        link = creds.get("config", "")
+    elif proto == "amnezia_wg":
+        link = creds.get("amnezia_link", creds.get("config", ""))
+    elif proto == "xray_vless":
+        import urllib.parse
+        params = urllib.parse.urlencode({
+            "encryption": "none",
+            "security": "reality",
+            "flow": "xtls-rprx-vision",
+            "type": "tcp",
+        })
+        link = f"vless://{creds.get('uuid', '')}@{server_ip}:{creds.get('port', 443)}?{params}#{urllib.parse.quote(name)}"
+    elif proto == "xray_vmess":
+        import json, base64
+        vmess_obj = {
+            "v": "2", "ps": name, "add": server_ip,
+            "port": str(creds.get("port", 10086)),
+            "id": creds.get("uuid", ""), "aid": "0",
+            "scy": "auto", "net": "ws", "type": "none",
+            "host": "", "path": "/vmess", "tls": "",
+        }
+        link = "vmess://" + base64.b64encode(json.dumps(vmess_obj).encode()).decode()
+    elif proto == "xray_trojan":
+        import urllib.parse
+        link = f"trojan://{creds.get('password', '')}@{server_ip}:{creds.get('port', 443)}?security=tls#{urllib.parse.quote(name)}"
+    elif proto == "xray_shadowsocks":
+        import base64, urllib.parse
+        method = creds.get("method", "aes-256-gcm")
+        userinfo = base64.b64encode(f"{method}:{creds.get('password', '')}".encode()).decode()
+        link = f"ss://{userinfo}@{server_ip}:{creds.get('port', 8388)}#{urllib.parse.quote(name)}"
+    elif proto == "openvpn":
+        link = creds.get("ovpn_config", "")
+    else:
+        link = ""
+
+    from app.services.proxy_service import generate_proxy_qr
+    qr_b64 = generate_proxy_qr(link) if link else ""
+
+    return {"link": link, "qr_base64": qr_b64}
